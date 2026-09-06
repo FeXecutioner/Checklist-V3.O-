@@ -1,0 +1,6 @@
+{
+  "name": "FeXecutioner Trading OS",
+  "description": "Trading execution console and comprehensive internal trade journal OS with real-time telemetry, risk buffer calculator, and dynamic trade records.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
