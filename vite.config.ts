@@ -1,12 +1,40 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import fs from 'node:fs';
 import {defineConfig} from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
   return {
     plugins: [
+      {
+        name: 'missing-assets-are-not-navigation',
+        configureServer(server) {
+          server.middlewares.use((req, res, next) => {
+            const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+            if (pathname.startsWith('/assets/') && !fs.existsSync(path.join(server.config.publicDir, pathname))) {
+              res.statusCode = 404;
+              res.setHeader('Content-Type', 'text/plain');
+              res.end('Asset not found');
+              return;
+            }
+            next();
+          });
+        },
+        configurePreviewServer(server) {
+          server.middlewares.use((req, res, next) => {
+            const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+            if (/\.(?:js|mjs|css|tsx?|jsx|map)$/.test(pathname) && !fs.existsSync(path.join(server.config.root, server.config.build.outDir, pathname))) {
+              res.statusCode = 404;
+              res.setHeader('Content-Type', 'text/plain');
+              res.end('Asset not found');
+              return;
+            }
+            next();
+          });
+        },
+      },
       react(),
       tailwindcss(),
       VitePWA({
@@ -45,6 +73,7 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          navigateFallbackDenylist: [/^\/assets\//, /^\/src\//, /\.(?:js|mjs|css|map)$/],
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           skipWaiting: true,
           clientsClaim: true,
@@ -81,7 +110,7 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
+          enabled: false,
           type: 'module',
         },
       }),

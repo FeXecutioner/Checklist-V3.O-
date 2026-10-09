@@ -13,6 +13,22 @@ export function initPWAUpdates() {
     return;
   }
 
+  // Development must not install a worker or reload on controller changes.
+  // Remove only this app's worker at the current scope, preserving journal data.
+  if (import.meta.env.DEV) {
+    const scope = new URL(import.meta.env.BASE_URL, window.location.origin).href;
+    void navigator.serviceWorker.getRegistrations().then(async registrations => {
+      for (const registration of registrations) {
+        const worker = registration.active || registration.waiting || registration.installing;
+        const script = worker && new URL(worker.scriptURL);
+        if (registration.scope === scope && script && /\/(?:sw|dev-sw)\.js$/.test(script.pathname)) {
+          await registration.unregister();
+        }
+      }
+    }).catch(error => console.warn('[PWA] Development worker cleanup failed:', error));
+    return;
+  }
+
   updateSWFn = registerSW({
     immediate: true,
     onNeedRefresh() {

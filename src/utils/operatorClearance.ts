@@ -82,7 +82,7 @@ export async function loadOperatorClearance(trades: TradeRecord[] = []): Promise
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed: ClearanceStoredRecord = JSON.parse(raw);
-      if (parsed && parsed.date === todayNy) {
+      if (parsed && parsed.date === todayNy && !todayNoTrade) {
         return parsed;
       }
     }

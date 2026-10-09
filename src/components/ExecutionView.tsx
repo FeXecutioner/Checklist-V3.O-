@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import html2canvas from 'html2canvas';
+import { checklistProgress } from '../utils/checklist';
 import { SetupType, GateStatus, ChecklistState, ExecutionJournalInputs, TradeRecord, TradingAccount } from '../types';
 import { OperatorClearance } from './OperatorClearance';
 import {
@@ -190,6 +191,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
 
   // Pre-Engagement / Operator Clearance Handlers
   const handleClearanceAnswer = async (index: number, answer: boolean) => {
+    if (clearanceRecord.reason || clearanceError || !clearanceReady) return;
     const todayNy = getNyTradingDate();
     const nextAnswers = [...clearanceRecord.answers];
     nextAnswers[index] = answer;
@@ -198,6 +200,8 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
       // Any NO locks execution for the rest of today (New York time), across all accounts
       const failedCheck = CLEARANCE_CHECKS[index];
       const lockReason = `Clearance check #${index + 1} answered NO: "${failedCheck}"`;
+      setClearanceRecord(prev => ({ ...prev, answers: nextAnswers, allowed: false, reason: lockReason }));
+      setStatus('NO-GO');
 
       // Record disciplined No Trade Day in internal journal
       try {
@@ -285,6 +289,8 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
   const handleClearanceStop = async () => {
     const todayNy = getNyTradingDate();
     const lockReason = 'Operator consciously declared No-Trade Day during Pre-Engagement clearance.';
+    setClearanceRecord(prev => ({ ...prev, allowed: false, reason: lockReason }));
+    setStatus('NO-GO');
 
     try {
       const noTradeRecord: TradeRecord = {
@@ -350,58 +356,20 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
     void loadClearance();
   };
 
-  const handleClearanceResetDay = async () => {
-    const todayNy = getNyTradingDate();
-    const freshRecord: ClearanceStoredRecord = {
-      date: todayNy,
-      answers: createEmptyClearanceAnswers(),
-      allowed: false,
-      reason: undefined,
-      journalStatus: '',
-      updatedAt: Date.now(),
-    };
-    try {
-      await saveOperatorClearance(freshRecord);
-      setClearanceRecord(freshRecord);
-      setStatus('NO-GO');
-    } catch {
-      setClearanceError('Failed to reset clearance.');
-    }
-  };
-
   // Calculation for PnL
   const beforeVal = parseFloat(journalInputs.balBefore) || 0;
   const afterVal = parseFloat(journalInputs.balAfter) || 0;
   const pnlDiff = journalInputs.balBefore !== '' && journalInputs.balAfter !== '' ? afterVal - beforeVal : 0;
 
-  // Track checklist completion to update Gate Status
-  const s1Complete = checklist.premarketAction && checklist.htfFvg;
-  const s2Complete = checklist.m5m15Gap && checklist.manipulation;
-  const s3Complete = checklist.inversionFound && checklist.highestTfGap;
-  const s4Complete = checklist.rrRatio && checklist.clearLiquidity && checklist.inversionSpeed;
-
-  const allSectionsComplete = s1Complete && s2Complete && s3Complete && s4Complete;
-
-  const gateComplete =
-    checklist.gateSessionWindow &&
-    checklist.gateHtfGap &&
-    checklist.gateM5M15Manip &&
-    checklist.gateInversionHighest &&
-    checklist.gatePlannedTrade;
+  const { s1Complete, s2Complete, s3Complete, s4Complete, allSectionsComplete } = checklistProgress(checklist);
+  const operatorAllowed = clearanceReady && !clearanceError && clearanceRecord.allowed &&
+    !clearanceRecord.reason && clearanceRecord.date === getNyTradingDate() &&
+    clearanceRecord.answers.length === CLEARANCE_CHECKS.length && clearanceRecord.answers.every(a => a === true);
+  const gateComplete = operatorAllowed && allSectionsComplete && setup !== 'no_trade' && !isNoTradeChecked;
 
   useEffect(() => {
-    if (!clearanceRecord.allowed) {
-      if (status !== 'NO-GO') setStatus('NO-GO');
-      return;
-    }
-    if (allSectionsComplete && gateComplete) {
-      if (status !== 'GO') setStatus('GO');
-    } else if (allSectionsComplete) {
-      if (status !== 'STANDBY') setStatus('STANDBY');
-    } else {
-      if (status !== 'NO-GO') setStatus('NO-GO');
-    }
-  }, [clearanceRecord.allowed, allSectionsComplete, gateComplete, status, setStatus]);
+    setStatus(gateComplete ? 'GO' : 'NO-GO');
+  }, [gateComplete, setStatus]);
 
   // Handle image upload & preview
   const handleImageFile = (file: File) => {
@@ -425,6 +393,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
 
   // Commit to Internal Journal
   const handleCommit = async () => {
+    if (!gateComplete) return;
     setIsCapturing(true);
     setSaveSuccessMsg(null);
 
@@ -528,8 +497,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
     }
   };
 
-  const isGateArmed = clearanceRecord.allowed && allSectionsComplete;
-  const isExecutionOpen = clearanceRecord.allowed && status === 'GO';
+  const isExecutionOpen = gateComplete;
 
   return (
     <div className="relative">
@@ -573,7 +541,6 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
         onAnswer={handleClearanceAnswer}
         onStop={handleClearanceStop}
         onRetry={handleClearanceRetry}
-        onResetDay={handleClearanceResetDay}
       />
 
       {/* NO TRADE DAY PROTOCOL CARD */}
@@ -643,7 +610,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
       </div>
 
       {/* S1–S4 EXECUTION SECTIONS & GATE (Gated by Operator Clearance) */}
-      <fieldset disabled={!clearanceRecord.allowed} className="border-0 p-0 m-0">
+      <fieldset disabled={!operatorAllowed} className="border-0 p-0 m-0">
         {!clearanceRecord.allowed && (
           <div className="mb-5 p-3.5 bg-zinc-900/90 border border-teal-500/30 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 font-mono text-xs text-zinc-300 shadow-md">
             <span className="flex items-center gap-2">
@@ -651,7 +618,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
               <span>
                 {clearanceRecord.reason
                   ? `EXECUTION LOCKED: ${clearanceRecord.reason}`
-                  : 'S1–S4 Checklist & Execution Gate locked — Pass all 5 Pre-Engagement Clearance checks to unlock.'}
+                  : 'S1–S4 Checklist locked — Pass all 5 Pre-Engagement Clearance checks to unlock.'}
               </span>
             </span>
             <span className="text-[11px] text-teal-300 font-bold bg-teal-950/80 px-2.5 py-1 rounded-lg border border-teal-500/30 shrink-0">
@@ -662,7 +629,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
 
         <div className={`grid grid-cols-1 md:grid-cols-2 gap-5 transition-opacity duration-300 ${!clearanceRecord.allowed ? 'opacity-40 select-none' : ''}`}>
         {/* S1 */}
-        <div className="bg-zinc-900/40 border border-white/10 backdrop-blur-xl rounded-2xl md:rounded-3xl overflow-hidden shadow-xl">
+        <fieldset disabled={!operatorAllowed} aria-label="S1" className="bg-zinc-900/40 border border-white/10 backdrop-blur-xl rounded-2xl md:rounded-3xl overflow-hidden shadow-xl">
           <div className="flex items-center justify-between p-4 bg-white/[0.03] border-b border-white/10">
             <div className="flex items-center gap-2.5">
               <span className="bg-gradient-to-tr from-teal-400 to-purple-600 text-white font-mono text-[10px] px-2 py-0.5 rounded-lg font-bold shadow-[0_0_10px_rgba(45,212,191,0.3)]">
@@ -739,6 +706,21 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
           </div>
 
           <div className="divide-y divide-white/5">
+            <label
+              className="flex gap-3.5 p-4 cursor-pointer hover:bg-white/[0.02] transition-colors items-start"
+            >
+              <input
+                type="checkbox"
+                id="gate-check-session"
+                checked={checklist.gateSessionWindow}
+                onChange={(e) => setChecklist((prev) => ({ ...prev, gateSessionWindow: e.target.checked }))}
+                className="w-5 h-5 accent-teal-400 mt-0.5 cursor-pointer shrink-0 disabled:cursor-not-allowed rounded"
+              />
+              <div className="text-xs leading-relaxed font-medium text-zinc-200">
+                Inside my <b className="text-white">Session Window</b>?
+              </div>
+            </label>
+
             <label className="flex gap-3.5 p-4 cursor-pointer hover:bg-white/[0.02] transition-colors items-start">
               <input
                 type="checkbox"
@@ -764,17 +746,17 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                 className="w-5 h-5 accent-teal-400 mt-0.5 cursor-pointer shrink-0 rounded"
               />
               <div className="text-xs leading-relaxed font-medium text-zinc-200">
-                Found the most recent <b className="text-white">HTF gap</b> we have bounced off or are inside currently.
+                Setup confirmed from the most recent <b className="text-white">HTF gap</b> we have bounced off or are inside currently.
                 <span className="block text-[11px] text-zinc-400 font-mono mt-1">
                   The higher timeframe fair value gap (1H / 4H).
                 </span>
               </div>
             </label>
           </div>
-        </div>
+        </fieldset>
 
         {/* S2 */}
-        <div className="bg-zinc-900/40 border border-white/10 backdrop-blur-xl rounded-2xl md:rounded-3xl overflow-hidden shadow-xl">
+        <fieldset disabled={!operatorAllowed || !s1Complete} aria-label="S2" className="bg-zinc-900/40 border border-white/10 backdrop-blur-xl rounded-2xl md:rounded-3xl overflow-hidden shadow-xl">
           <div className="flex items-center justify-between p-4 bg-white/[0.03] border-b border-white/10">
             <div className="flex items-center gap-2.5">
               <span className="bg-gradient-to-tr from-teal-400 to-purple-600 text-white font-mono text-[10px] px-2 py-0.5 rounded-lg font-bold shadow-[0_0_10px_rgba(45,212,191,0.3)]">
@@ -826,10 +808,10 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
               </div>
             </label>
           </div>
-        </div>
+        </fieldset>
 
         {/* S3 */}
-        <div className="bg-zinc-900/40 border border-white/10 backdrop-blur-xl rounded-2xl md:rounded-3xl overflow-hidden shadow-xl">
+        <fieldset disabled={!operatorAllowed || !s1Complete || !s2Complete} aria-label="S3" className="bg-zinc-900/40 border border-white/10 backdrop-blur-xl rounded-2xl md:rounded-3xl overflow-hidden shadow-xl">
           <div className="flex items-center justify-between p-4 bg-white/[0.03] border-b border-white/10">
             <div className="flex items-center gap-2.5">
               <span className="bg-gradient-to-tr from-teal-400 to-purple-600 text-white font-mono text-[10px] px-2 py-0.5 rounded-lg font-bold shadow-[0_0_10px_rgba(45,212,191,0.3)]">
@@ -875,10 +857,10 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
               </div>
             </label>
           </div>
-        </div>
+        </fieldset>
 
         {/* S4 */}
-        <div className="bg-zinc-900/40 border border-white/10 backdrop-blur-xl rounded-2xl md:rounded-3xl overflow-hidden shadow-xl">
+        <fieldset disabled={!operatorAllowed || !s1Complete || !s2Complete || !s3Complete} aria-label="S4" className="bg-zinc-900/40 border border-white/10 backdrop-blur-xl rounded-2xl md:rounded-3xl overflow-hidden shadow-xl">
           <div className="flex items-center justify-between p-4 bg-white/[0.03] border-b border-white/10">
             <div className="flex items-center gap-2.5">
               <span className="bg-gradient-to-tr from-teal-400 to-purple-600 text-white font-mono text-[10px] px-2 py-0.5 rounded-lg font-bold shadow-[0_0_10px_rgba(45,212,191,0.3)]">
@@ -1124,6 +1106,21 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
           </div>
 
           <div className="divide-y divide-white/5">
+            <label
+              className="flex gap-3.5 p-4 cursor-pointer hover:bg-white/[0.02] transition-colors items-start"
+            >
+              <input
+                type="checkbox"
+                id="gate-check-planned"
+                checked={checklist.gatePlannedTrade}
+                onChange={(e) => setChecklist((prev) => ({ ...prev, gatePlannedTrade: e.target.checked }))}
+                className="w-5 h-5 accent-teal-400 mt-0.5 cursor-pointer shrink-0 disabled:cursor-not-allowed rounded"
+              />
+              <div className="text-xs leading-relaxed font-medium text-zinc-200">
+                This is the trade I <b className="text-white">planned for</b>?
+              </div>
+            </label>
+
             <label className="flex gap-3.5 p-3.5 cursor-pointer hover:bg-white/[0.02] transition-colors items-start">
               <input
                 type="checkbox"
@@ -1166,152 +1163,13 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
               </div>
             </label>
           </div>
-        </div>
+        </fieldset>
 
-        {/* THE GATE (Full Width) */}
-        <div
-          id="gate-panel"
-          className={`col-span-1 md:col-span-2 relative bg-zinc-900/40 border backdrop-blur-xl rounded-2xl md:rounded-3xl overflow-hidden transition-all duration-500 ${
-            isGateArmed
-              ? 'border-teal-400/60 shadow-[0_0_30px_rgba(45,212,191,0.25)]'
-              : 'border-white/10 shadow-xl'
-          }`}
-        >
-          {isGateArmed && (
-            <div className="absolute top-0 left-[-100%] w-full h-full bg-linear-to-r from-transparent via-[rgba(45,212,191,0.25)] to-transparent pointer-events-none animate-scan" />
-          )}
-
-          <div className="flex items-center justify-between p-4 bg-white/[0.03] border-b border-white/10">
-            <div className="flex items-center gap-2.5">
-              <span className="bg-purple-500/20 text-purple-300 border border-purple-500/30 font-mono text-[10px] px-2.5 py-0.5 rounded-lg font-bold">
-                GATE
-              </span>
-              <span className="font-disp font-bold text-sm uppercase text-zinc-100 tracking-wide">
-                Final Go / No-Go Gate
-              </span>
-            </div>
-            <div className="font-mono text-[11px] font-bold">
-              {isGateArmed ? (
-                <span className="text-teal-300 bg-teal-950/60 border border-teal-500/40 px-3 py-1 rounded-full shadow-[0_0_10px_rgba(45,212,191,0.25)]">
-                  ARMED & SCANNING
-                </span>
-              ) : (
-                <span className="text-zinc-500 bg-white/5 px-2.5 py-1 rounded-full border border-white/5">
-                  LOCKED (Complete S1–S4)
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="divide-y divide-white/5">
-            <label
-              className={`flex gap-3.5 p-4 transition-colors items-start ${
-                !isGateArmed ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer hover:bg-white/[0.02]'
-              }`}
-            >
-              <input
-                type="checkbox"
-                id="gate-check-session"
-                disabled={!isGateArmed}
-                checked={checklist.gateSessionWindow}
-                onChange={(e) => setChecklist((prev) => ({ ...prev, gateSessionWindow: e.target.checked }))}
-                className="w-5 h-5 accent-teal-400 mt-0.5 cursor-pointer shrink-0 disabled:cursor-not-allowed rounded"
-              />
-              <div className="text-xs leading-relaxed font-medium text-zinc-200">
-                Inside my <b className="text-white">Session Window</b>?
-              </div>
-            </label>
-
-            <label
-              className={`flex gap-3.5 p-4 transition-colors items-start ${
-                !isGateArmed ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer hover:bg-white/[0.02]'
-              }`}
-            >
-              <input
-                type="checkbox"
-                id="gate-check-htf"
-                disabled={!isGateArmed}
-                checked={checklist.gateHtfGap}
-                onChange={(e) => setChecklist((prev) => ({ ...prev, gateHtfGap: e.target.checked }))}
-                className="w-5 h-5 accent-teal-400 mt-0.5 cursor-pointer shrink-0 disabled:cursor-not-allowed rounded"
-              />
-              <div className="text-xs leading-relaxed font-medium text-zinc-200">
-                Setup confirmed from <b className="text-white">HTF Gap</b>?
-              </div>
-            </label>
-
-            <label
-              className={`flex gap-3.5 p-4 transition-colors items-start ${
-                !isGateArmed ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer hover:bg-white/[0.02]'
-              }`}
-            >
-              <input
-                type="checkbox"
-                id="gate-check-m5m15"
-                disabled={!isGateArmed}
-                checked={checklist.gateM5M15Manip}
-                onChange={(e) => setChecklist((prev) => ({ ...prev, gateM5M15Manip: e.target.checked }))}
-                className="w-5 h-5 accent-teal-400 mt-0.5 cursor-pointer shrink-0 disabled:cursor-not-allowed rounded"
-              />
-              <div className="text-xs leading-relaxed font-medium text-zinc-200">
-                5m/15m gap <b className="text-white">manipulated + swept</b>?
-              </div>
-            </label>
-
-            <label
-              className={`flex gap-3.5 p-4 transition-colors items-start ${
-                !isGateArmed ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer hover:bg-white/[0.02]'
-              }`}
-            >
-              <input
-                type="checkbox"
-                id="gate-check-inversion"
-                disabled={!isGateArmed}
-                checked={checklist.gateInversionHighest}
-                onChange={(e) => setChecklist((prev) => ({ ...prev, gateInversionHighest: e.target.checked }))}
-                className="w-5 h-5 accent-teal-400 mt-0.5 cursor-pointer shrink-0 disabled:cursor-not-allowed rounded"
-              />
-              <div className="text-xs leading-relaxed font-medium text-zinc-200">
-                <b className="text-white">Inversion confirmed</b> off highest-TF gap? Is the IFVG in 3 candles or less?
-              </div>
-            </label>
-
-            <label
-              className={`flex gap-3.5 p-4 transition-colors items-start ${
-                !isGateArmed ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer hover:bg-white/[0.02]'
-              }`}
-            >
-              <input
-                type="checkbox"
-                id="gate-check-planned"
-                disabled={!isGateArmed}
-                checked={checklist.gatePlannedTrade}
-                onChange={(e) => setChecklist((prev) => ({ ...prev, gatePlannedTrade: e.target.checked }))}
-                className="w-5 h-5 accent-teal-400 mt-0.5 cursor-pointer shrink-0 disabled:cursor-not-allowed rounded"
-              />
-              <div className="text-xs leading-relaxed font-medium text-zinc-200">
-                This is the trade I <b className="text-white">planned for</b>?
-              </div>
-            </label>
-          </div>
-        </div>
       </div>
       </fieldset>
 
-      {/* Manual Open / Close Flow Toggle helper */}
-      <div className="mt-5 flex justify-end">
-        <button
-          type="button"
-          disabled={!clearanceRecord.allowed}
-          onClick={() => setStatus(status === 'GO' ? 'STANDBY' : 'GO')}
-          className={`text-xs font-mono underline transition-colors cursor-pointer ${
-            !clearanceRecord.allowed
-              ? 'text-zinc-600 cursor-not-allowed opacity-40'
-              : 'text-zinc-500 hover:text-teal-400'
-          }`}
-        >
-          {status === 'GO' ? 'Hide Execution Log Form' : 'Show Execution Log Form Early'}
-        </button>
+      <div id="execution-outcome" role="status" className="mt-5 p-4 rounded-xl border border-white/10 font-mono text-sm">
+        {gateComplete ? 'Execute — all required checks complete.' : 'No Trade — complete Pre-Engagement and S1 → S2 → S3 → S4.'}
       </div>
 
       {/* BOTTOM EXECUTION FLOW (DYNAMIC) */}
