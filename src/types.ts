@@ -38,7 +38,8 @@ export interface ChecklistState {
   clearLiquidity: boolean;
   inversionSpeed: boolean;
   
-  // Gate
+  // Retained field names: session is answered in S1, planned trade in S4.
+  // The other three gate fields are legacy duplicate answers.
   gateSessionWindow: boolean;
   gateHtfGap: boolean;
   gateM5M15Manip: boolean;
