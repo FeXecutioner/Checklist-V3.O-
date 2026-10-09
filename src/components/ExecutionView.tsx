@@ -1,7 +1,34 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import html2canvas from 'html2canvas';
-import { SetupType, GateStatus, ChecklistState, ExecutionJournalInputs, TradeRecord } from '../types';
-import { CheckCircle2, RefreshCw, Camera, Save, X, Radio } from 'lucide-react';
+import { SetupType, GateStatus, ChecklistState, ExecutionJournalInputs, TradeRecord, TradingAccount } from '../types';
+import { OperatorClearance } from './OperatorClearance';
+import {
+  CLEARANCE_CHECKS,
+  loadOperatorClearance,
+  saveOperatorClearance,
+  getNyTradingDate,
+  createEmptyClearanceAnswers,
+  type ClearanceStoredRecord,
+} from '../utils/operatorClearance';
+import {
+  CheckCircle2,
+  RefreshCw,
+  Camera,
+  Save,
+  X,
+  Radio,
+  ShieldCheck,
+  ArrowRight,
+  Layers,
+  Wallet,
+  Edit2,
+  Lock,
+  Unlock,
+  Target,
+  Shield,
+  ShieldAlert,
+  TrendingUp,
+} from 'lucide-react';
 
 interface ExecutionViewProps {
   setup: SetupType;
@@ -14,6 +41,12 @@ interface ExecutionViewProps {
   setChecklist: React.Dispatch<React.SetStateAction<ChecklistState>>;
   journalInputs: ExecutionJournalInputs;
   setJournalInputs: React.Dispatch<React.SetStateAction<ExecutionJournalInputs>>;
+  onTriggerNoTradeDay?: () => void;
+  activeAccount?: TradingAccount;
+  accounts?: TradingAccount[];
+  trades?: TradeRecord[];
+  onSelectAccount?: (accountId: string) => void;
+  onOpenManageModal?: (editAccountId?: string) => void;
 }
 
 export const ExecutionView: React.FC<ExecutionViewProps> = ({
@@ -27,16 +60,314 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
   setChecklist,
   journalInputs,
   setJournalInputs,
+  onTriggerNoTradeDay,
+  activeAccount,
+  accounts = [],
+  trades = [],
+  onSelectAccount,
+  onOpenManageModal,
 }) => {
   const [isCapturing, setIsCapturing] = useState<boolean>(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
+  const [isNoTradeChecked, setIsNoTradeChecked] = useState<boolean>(setup === 'no_trade');
+  const [allowManualOverride, setAllowManualOverride] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const captureZoneRef = useRef<HTMLDivElement>(null);
 
-  // Calculation for Risk Buffer
-  const dd = parseFloat(checklist.maxDD) || 0;
+  // Operator Clearance State (Must pass 5/5 before S1-S4 opens and Gate can arm)
+  const [clearanceRecord, setClearanceRecord] = useState<ClearanceStoredRecord>({
+    date: getNyTradingDate(),
+    answers: createEmptyClearanceAnswers(),
+    allowed: false,
+    reason: undefined,
+    journalStatus: '',
+    updatedAt: Date.now(),
+  });
+  const [clearanceReady, setClearanceReady] = useState<boolean>(false);
+  const [clearanceError, setClearanceError] = useState<string>('');
+
+  const loadClearance = useCallback(async () => {
+    try {
+      setClearanceError('');
+      const rec = await loadOperatorClearance(trades);
+      setClearanceRecord(rec);
+      setClearanceReady(true);
+    } catch {
+      setClearanceError('Unable to load operator clearance status.');
+      setClearanceReady(true);
+    }
+  }, [trades]);
+
+  useEffect(() => {
+    void loadClearance();
+    const handleClearanceChange = (e: Event) => {
+      const detail = (e as CustomEvent<ClearanceStoredRecord>).detail;
+      if (detail) {
+        setClearanceRecord(detail);
+        setClearanceReady(true);
+      }
+    };
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'fexec_operator_clearance_v1' || e.key === 'fexec_trades_v2') {
+        void loadClearance();
+      }
+    };
+    window.addEventListener('fexec-operator-clearance-change', handleClearanceChange);
+    window.addEventListener('storage', handleStorageChange);
+    return () => {
+      window.removeEventListener('fexec-operator-clearance-change', handleClearanceChange);
+      window.removeEventListener('storage', handleStorageChange);
+    };
+  }, [loadClearance]);
+
+  // Active Account Closed Trades & Dynamic Profit Growth
+  const activeAccountTrades = useMemo(() => {
+    if (!activeAccount) return [];
+    return trades.filter((t) => (t.accountId || 'acc-live-main') === activeAccount.id);
+  }, [trades, activeAccount]);
+
+  const activeAccountNetPnL = useMemo(() => {
+    return activeAccountTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
+  }, [activeAccountTrades]);
+
+  // Fixed Account Size that dynamically updates as profit grows!
+  const baseStartingBalance = activeAccount?.initialBalance || 50000;
+  const fixedLiveAccountSize = baseStartingBalance + activeAccountNetPnL;
+
+  // Fixed Account Drawdown & Profit Target from account settings
+  const fixedAccountMaxDD = activeAccount?.maxDrawdown || 2500;
+  const accountProfitTarget = activeAccount?.profitTarget || 3000;
+
+  // Keep checklist values in sync with the fixed account size and max drawdown
+  useEffect(() => {
+    if (!allowManualOverride) {
+      setChecklist((prev) => {
+        const nextAcct = String(fixedLiveAccountSize);
+        const nextDD = String(fixedAccountMaxDD);
+        const nextTarget = String(accountProfitTarget);
+        if (prev.acctSize !== nextAcct || prev.maxDD !== nextDD || prev.profitTarget !== nextTarget) {
+          return {
+            ...prev,
+            acctSize: nextAcct,
+            maxDD: nextDD,
+            profitTarget: nextTarget,
+          };
+        }
+        return prev;
+      });
+
+      // Default balBefore to current live account size if untouched
+      setJournalInputs((prev) => {
+        if (!prev.balBefore || prev.balBefore === '50000' || prev.balBefore === String(baseStartingBalance)) {
+          return {
+            ...prev,
+            balBefore: String(fixedLiveAccountSize),
+          };
+        }
+        return prev;
+      });
+    }
+  }, [fixedLiveAccountSize, fixedAccountMaxDD, accountProfitTarget, allowManualOverride, baseStartingBalance, setChecklist, setJournalInputs]);
+
+  // Calculation for Risk Buffer Zone
+  const effectiveAcctSize = allowManualOverride ? (parseFloat(checklist.acctSize) || fixedLiveAccountSize) : fixedLiveAccountSize;
+  const effectiveDD = allowManualOverride ? (parseFloat(checklist.maxDD) || fixedAccountMaxDD) : fixedAccountMaxDD;
   const rpt = parseFloat(checklist.riskPerTrade) || 0;
-  const bufferCount = dd > 0 && rpt > 0 ? Math.floor(dd / rpt) : null;
+  const bufferCount = effectiveDD > 0 && rpt > 0 ? Math.floor(effectiveDD / rpt) : null;
+  const riskPct = effectiveAcctSize > 0 && rpt > 0 ? (rpt / effectiveAcctSize) * 100 : 0;
+
+  // Profit Target telemetry calculations (Strict 1:1 to 1.5R Max rule)
+  const targetGoal = accountProfitTarget || 0;
+  const targetAchieved = activeAccountNetPnL > 0 ? activeAccountNetPnL : 0;
+  const targetRemaining = Math.max(0, targetGoal - targetAchieved);
+  const targetPct = targetGoal > 0 ? Math.min(100, Math.max(0, (targetAchieved / targetGoal) * 100)) : 0;
+  const winsAt15RNeeded = rpt > 0 && targetRemaining > 0 ? Math.ceil(targetRemaining / (rpt * 1.5)) : 0;
+  const winsAt1RNeeded = rpt > 0 && targetRemaining > 0 ? Math.ceil(targetRemaining / (rpt * 1.0)) : 0;
+
+  // Drawdown remaining cushion (breach floor = starting balance - max drawdown)
+  const breachFloor = baseStartingBalance - effectiveDD;
+  const currentDrawdownCushion = Math.max(0, effectiveAcctSize - breachFloor);
+
+  // Pre-Engagement / Operator Clearance Handlers
+  const handleClearanceAnswer = async (index: number, answer: boolean) => {
+    const todayNy = getNyTradingDate();
+    const nextAnswers = [...clearanceRecord.answers];
+    nextAnswers[index] = answer;
+
+    if (answer === false) {
+      // Any NO locks execution for the rest of today (New York time), across all accounts
+      const failedCheck = CLEARANCE_CHECKS[index];
+      const lockReason = `Clearance check #${index + 1} answered NO: "${failedCheck}"`;
+
+      // Record disciplined No Trade Day in internal journal
+      try {
+        const noTradeRecord: TradeRecord = {
+          id: Date.now(),
+          timestamp: new Date().toLocaleString('en-US', {
+            dateStyle: 'medium',
+            timeStyle: 'short',
+          }),
+          setup: 'no_trade',
+          directionalBias: `Pre-Engagement Clearance Check #${index + 1} Failed`,
+          accountId: activeAccount?.id || 'acc-live-main',
+          accountName: activeAccount?.name || 'Main Live Account',
+          accountType: activeAccount?.type || 'live',
+          isBreakEven: false,
+          accountSize: effectiveAcctSize,
+          balanceBefore: effectiveAcctSize,
+          balanceAfter: effectiveAcctSize,
+          pnl: 0,
+          htfLogic: `Execution locked: Pre-Engagement check #${index + 1} ("${failedCheck}") answered NO. Capital strictly preserved ($0.00).`,
+          ltfTarget: 'None (Pre-Engagement Standby)',
+          entryModelTime: 'N/A',
+          morningRoutine: '',
+          feelings: 'Respected operator clearance protocol. Prevented trading when conditions or mental discipline did not meet 100% threshold.',
+          chartImage: null,
+          followedRules: true,
+          emotionsControlled: true,
+          ruleBreaks: 'None — Protected capital by halting before execution.',
+          improvements: 'Fresh clearance required next trading day.',
+          isNoTradeDay: true,
+          noTradeReason: lockReason,
+          checklistSummary: {
+            s1Done: false,
+            s2Done: false,
+            s3Done: false,
+            s4Done: false,
+            gatePassed: false,
+          },
+        };
+        await onCommitTrade(noTradeRecord);
+      } catch (err) {
+        console.warn('Could not auto-journal clearance lockout:', err);
+      }
+
+      const nextRecord: ClearanceStoredRecord = {
+        date: todayNy,
+        answers: nextAnswers,
+        allowed: false,
+        reason: lockReason,
+        journalStatus: 'Discipline logged to internal journal.',
+        updatedAt: Date.now(),
+      };
+
+      try {
+        await saveOperatorClearance(nextRecord);
+        setClearanceRecord(nextRecord);
+        setStatus('NO-GO');
+      } catch {
+        setClearanceError('Failed to save lockout status.');
+      }
+    } else {
+      // User clicked YES
+      const allPassed =
+        nextAnswers.length === CLEARANCE_CHECKS.length &&
+        nextAnswers.every((a) => a === true);
+
+      const nextRecord: ClearanceStoredRecord = {
+        date: todayNy,
+        answers: nextAnswers,
+        allowed: allPassed,
+        reason: undefined,
+        journalStatus: '',
+        updatedAt: Date.now(),
+      };
+
+      try {
+        await saveOperatorClearance(nextRecord);
+        setClearanceRecord(nextRecord);
+      } catch {
+        setClearanceError('Failed to persist clearance answer.');
+      }
+    }
+  };
+
+  const handleClearanceStop = async () => {
+    const todayNy = getNyTradingDate();
+    const lockReason = 'Operator consciously declared No-Trade Day during Pre-Engagement clearance.';
+
+    try {
+      const noTradeRecord: TradeRecord = {
+        id: Date.now(),
+        timestamp: new Date().toLocaleString('en-US', {
+          dateStyle: 'medium',
+          timeStyle: 'short',
+        }),
+        setup: 'no_trade',
+        directionalBias: 'Declared No Trade Day during Pre-Engagement Clearance',
+        accountId: activeAccount?.id || 'acc-live-main',
+        accountName: activeAccount?.name || 'Main Live Account',
+        accountType: activeAccount?.type || 'live',
+        isBreakEven: false,
+        accountSize: effectiveAcctSize,
+        balanceBefore: effectiveAcctSize,
+        balanceAfter: effectiveAcctSize,
+        pnl: 0,
+        htfLogic: 'Operator consciously declared No Trade Day during Pre-Engagement clearance. Capital preserved ($0.00).',
+        ltfTarget: 'None (Pre-Engagement Declared Standby)',
+        entryModelTime: 'N/A',
+        morningRoutine: '',
+        feelings: 'Discretionary Standby. Protected capital by choosing not to engage the market today.',
+        chartImage: null,
+        followedRules: true,
+        emotionsControlled: true,
+        ruleBreaks: 'None — Capital fully protected.',
+        improvements: 'Fresh clearance required next trading day.',
+        isNoTradeDay: true,
+        noTradeReason: lockReason,
+        checklistSummary: {
+          s1Done: false,
+          s2Done: false,
+          s3Done: false,
+          s4Done: false,
+          gatePassed: false,
+        },
+      };
+      await onCommitTrade(noTradeRecord);
+    } catch (err) {
+      console.warn('Error recording trade for clearance stop:', err);
+    }
+
+    const nextRecord: ClearanceStoredRecord = {
+      date: todayNy,
+      answers: clearanceRecord.answers,
+      allowed: false,
+      reason: lockReason,
+      journalStatus: 'Discipline logged to internal journal.',
+      updatedAt: Date.now(),
+    };
+
+    try {
+      await saveOperatorClearance(nextRecord);
+      setClearanceRecord(nextRecord);
+      setStatus('NO-GO');
+    } catch {
+      setClearanceError('Failed to save declared no-trade day.');
+    }
+  };
+
+  const handleClearanceRetry = () => {
+    void loadClearance();
+  };
+
+  const handleClearanceResetDay = async () => {
+    const todayNy = getNyTradingDate();
+    const freshRecord: ClearanceStoredRecord = {
+      date: todayNy,
+      answers: createEmptyClearanceAnswers(),
+      allowed: false,
+      reason: undefined,
+      journalStatus: '',
+      updatedAt: Date.now(),
+    };
+    try {
+      await saveOperatorClearance(freshRecord);
+      setClearanceRecord(freshRecord);
+      setStatus('NO-GO');
+    } catch {
+      setClearanceError('Failed to reset clearance.');
+    }
+  };
 
   // Calculation for PnL
   const beforeVal = parseFloat(journalInputs.balBefore) || 0;
@@ -59,6 +390,10 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
     checklist.gatePlannedTrade;
 
   useEffect(() => {
+    if (!clearanceRecord.allowed) {
+      if (status !== 'NO-GO') setStatus('NO-GO');
+      return;
+    }
     if (allSectionsComplete && gateComplete) {
       if (status !== 'GO') setStatus('GO');
     } else if (allSectionsComplete) {
@@ -66,7 +401,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
     } else {
       if (status !== 'NO-GO') setStatus('NO-GO');
     }
-  }, [allSectionsComplete, gateComplete, status, setStatus]);
+  }, [clearanceRecord.allowed, allSectionsComplete, gateComplete, status, setStatus]);
 
   // Handle image upload & preview
   const handleImageFile = (file: File) => {
@@ -110,9 +445,11 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
       }
 
       const calculatedPnl =
-        journalInputs.manualPnL !== ''
-          ? parseFloat(journalInputs.manualPnL) || pnlDiff
-          : pnlDiff;
+        journalInputs.isBreakEven
+          ? (journalInputs.manualPnL !== '' ? parseFloat(journalInputs.manualPnL) || 0 : 0)
+          : (journalInputs.manualPnL !== ''
+              ? parseFloat(journalInputs.manualPnL) || pnlDiff
+              : pnlDiff);
 
       const record: TradeRecord = {
         id: Date.now(),
@@ -122,8 +459,13 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
         }),
         setup,
         directionalBias: checklist.biasInput.trim() || 'No explicit bias entered',
-        accountSize: checklist.acctSize ? parseFloat(checklist.acctSize) : undefined,
-        maxDrawdown: dd > 0 ? dd : undefined,
+        accountId: activeAccount?.id || 'acc-live-main',
+        accountName: activeAccount?.name || 'Main Live Account',
+        accountType: activeAccount?.type || 'live',
+        isBreakEven: journalInputs.isBreakEven,
+        accountSize: effectiveAcctSize,
+        maxDrawdown: effectiveDD > 0 ? effectiveDD : undefined,
+        profitTarget: targetGoal > 0 ? targetGoal : undefined,
         riskPerTrade: rpt > 0 ? rpt : undefined,
         bufferSurvivalTrades: bufferCount ?? undefined,
         balanceBefore: beforeVal,
@@ -140,6 +482,11 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
         emotionsControlled: journalInputs.emotionsControlled,
         ruleBreaks: journalInputs.ruleBreaks.trim(),
         improvements: journalInputs.improvements.trim(),
+        isNoTradeDay: isNoTradeChecked || setup === 'no_trade',
+        noTradeReason:
+          isNoTradeChecked || setup === 'no_trade'
+            ? checklist.biasInput.trim() || 'Disciplined Standby / Capital Preserved'
+            : undefined,
         checklistSummary: {
           s1Done: s1Complete,
           s2Done: s2Complete,
@@ -181,8 +528,8 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
     }
   };
 
-  const isGateArmed = allSectionsComplete;
-  const isExecutionOpen = status === 'GO';
+  const isGateArmed = clearanceRecord.allowed && allSectionsComplete;
+  const isExecutionOpen = clearanceRecord.allowed && status === 'GO';
 
   return (
     <div className="relative">
@@ -215,7 +562,105 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+      {/* PRE-ENGAGEMENT / OPERATOR CLEARANCE */}
+      <OperatorClearance
+        answers={clearanceRecord.answers}
+        allowed={clearanceRecord.allowed}
+        reason={clearanceRecord.reason}
+        ready={clearanceReady}
+        error={clearanceError}
+        journalStatus={clearanceRecord.journalStatus}
+        onAnswer={handleClearanceAnswer}
+        onStop={handleClearanceStop}
+        onRetry={handleClearanceRetry}
+        onResetDay={handleClearanceResetDay}
+      />
+
+      {/* NO TRADE DAY PROTOCOL CARD */}
+      <div className="mb-6 p-4 sm:p-5 rounded-2xl md:rounded-3xl bg-zinc-900/50 border border-teal-500/30 backdrop-blur-xl shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 transition-all hover:border-teal-400/50">
+        <div className="flex items-start sm:items-center gap-3.5">
+          <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-teal-500/20 to-purple-600/20 border border-teal-500/40 flex items-center justify-center text-teal-300 shrink-0 shadow-[0_0_15px_rgba(45,212,191,0.25)]">
+            <ShieldCheck size={22} className="text-teal-400" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-teal-400 bg-teal-950/70 border border-teal-500/40 px-2 py-0.5 rounded-md">
+                DISCIPLINE PROTOCOL
+              </span>
+              <span className="font-mono text-[11px] text-purple-300 font-bold bg-purple-950/60 border border-purple-500/30 px-2 py-0.5 rounded-md">
+                $0.00 PnL (Capital Preserved)
+              </span>
+            </div>
+            <h3 className="font-disp font-bold text-sm sm:text-base text-zinc-100 uppercase tracking-wide mt-1">
+              No Trade Day
+            </h3>
+            <p className="text-xs text-zinc-400 mt-0.5 leading-relaxed">
+              No A+ setup formed or outside session window? Tick the box to automatically open the journal section and document today's discipline.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-end shrink-0">
+          <label className="flex items-center gap-3 p-3 px-4 rounded-xl bg-zinc-950/80 border border-teal-400/40 hover:border-teal-400 cursor-pointer transition-all shadow-inner group">
+            <input
+              type="checkbox"
+              id="no-trade-day-checkbox"
+              checked={isNoTradeChecked || setup === 'no_trade'}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                setIsNoTradeChecked(checked);
+                if (checked) {
+                  setSetup('no_trade');
+                  if (onTriggerNoTradeDay) {
+                    onTriggerNoTradeDay();
+                  }
+                } else {
+                  setSetup('continuation');
+                }
+              }}
+              className="w-5 h-5 accent-teal-400 cursor-pointer rounded"
+            />
+            <span className="font-mono text-xs font-bold text-teal-300 group-hover:text-teal-200 uppercase tracking-wider">
+              Log No Trade Day
+            </span>
+          </label>
+
+          {onTriggerNoTradeDay && (
+            <button
+              type="button"
+              onClick={() => {
+                setIsNoTradeChecked(true);
+                setSetup('no_trade');
+                onTriggerNoTradeDay();
+              }}
+              className="sm:hidden px-3 py-2.5 bg-teal-500/10 hover:bg-teal-500/20 text-teal-300 border border-teal-500/30 rounded-xl text-xs font-mono font-bold flex items-center gap-1 cursor-pointer"
+            >
+              <span>Journal</span>
+              <ArrowRight size={13} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* S1–S4 EXECUTION SECTIONS & GATE (Gated by Operator Clearance) */}
+      <fieldset disabled={!clearanceRecord.allowed} className="border-0 p-0 m-0">
+        {!clearanceRecord.allowed && (
+          <div className="mb-5 p-3.5 bg-zinc-900/90 border border-teal-500/30 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 font-mono text-xs text-zinc-300 shadow-md">
+            <span className="flex items-center gap-2">
+              <Lock size={15} className="text-teal-400 shrink-0" />
+              <span>
+                {clearanceRecord.reason
+                  ? `EXECUTION LOCKED: ${clearanceRecord.reason}`
+                  : 'S1–S4 Checklist & Execution Gate locked — Pass all 5 Pre-Engagement Clearance checks to unlock.'}
+              </span>
+            </span>
+            <span className="text-[11px] text-teal-300 font-bold bg-teal-950/80 px-2.5 py-1 rounded-lg border border-teal-500/30 shrink-0">
+              {clearanceRecord.answers.filter((a) => a === true).length}/5 CHECKS CLEARED
+            </span>
+          </div>
+        )}
+
+        <div className={`grid grid-cols-1 md:grid-cols-2 gap-5 transition-opacity duration-300 ${!clearanceRecord.allowed ? 'opacity-40 select-none' : ''}`}>
         {/* S1 */}
         <div className="bg-zinc-900/40 border border-white/10 backdrop-blur-xl rounded-2xl md:rounded-3xl overflow-hidden shadow-xl">
           <div className="flex items-center justify-between p-4 bg-white/[0.03] border-b border-white/10">
@@ -234,7 +679,10 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
             <button
               type="button"
               id="btn-continuation"
-              onClick={() => setSetup('continuation')}
+              onClick={() => {
+                setSetup('continuation');
+                setIsNoTradeChecked(false);
+              }}
               className={`flex-1 py-2 px-3 font-mono text-[11px] font-bold uppercase rounded-xl border transition-all cursor-pointer ${
                 setup === 'continuation'
                   ? 'bg-teal-500/20 text-teal-300 border-teal-500/50 shadow-[0_0_12px_rgba(45,212,191,0.25)]'
@@ -246,7 +694,10 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
             <button
               type="button"
               id="btn-reversal"
-              onClick={() => setSetup('reversal')}
+              onClick={() => {
+                setSetup('reversal');
+                setIsNoTradeChecked(false);
+              }}
               className={`flex-1 py-2 px-3 font-mono text-[11px] font-bold uppercase rounded-xl border transition-all cursor-pointer ${
                 setup === 'reversal'
                   ? 'bg-purple-500/20 text-purple-300 border-purple-500/50 shadow-[0_0_12px_rgba(168,85,247,0.25)]'
@@ -254,6 +705,22 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
               }`}
             >
               Reversal
+            </button>
+            <button
+              type="button"
+              id="btn-no-trade-s1"
+              onClick={() => {
+                setSetup('no_trade');
+                setIsNoTradeChecked(true);
+                if (onTriggerNoTradeDay) onTriggerNoTradeDay();
+              }}
+              className={`flex-1 py-2 px-3 font-mono text-[11px] font-bold uppercase rounded-xl border transition-all cursor-pointer ${
+                setup === 'no_trade'
+                  ? 'bg-zinc-800 text-teal-300 border-teal-400 shadow-[0_0_12px_rgba(45,212,191,0.25)]'
+                  : 'bg-white/5 text-zinc-400 border-white/10 hover:bg-white/10'
+              }`}
+            >
+              No Trade
             </button>
           </div>
 
@@ -281,9 +748,9 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                 className="w-5 h-5 accent-teal-400 mt-0.5 cursor-pointer shrink-0 rounded"
               />
               <div className="text-xs leading-relaxed font-medium text-zinc-200">
-                Checked <b className="text-white">Premarket price action</b>
+                Done <b className="text-white">surface level analysis of current PA</b>
                 <span className="block text-[11px] text-zinc-400 font-mono mt-1">
-                  Reviewed overnight highs/lows and premarket VWAP levels.
+                  Reviewed current price action.
                 </span>
               </div>
             </label>
@@ -297,9 +764,9 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                 className="w-5 h-5 accent-teal-400 mt-0.5 cursor-pointer shrink-0 rounded"
               />
               <div className="text-xs leading-relaxed font-medium text-zinc-200">
-                Found the most recent <b className="text-white">1H / 4H FVG</b>
+                Found the most recent <b className="text-white">HTF gap</b> we have bounced off or are inside currently.
                 <span className="block text-[11px] text-zinc-400 font-mono mt-1">
-                  The higher timeframe fair value gap price is currently reacting to.
+                  The higher timeframe fair value gap (1H / 4H).
                 </span>
               </div>
             </label>
@@ -354,7 +821,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
               <div className="text-xs leading-relaxed font-medium text-zinc-200">
                 Confirmed <b className="text-white">Manipulation</b>
                 <span className="block text-[11px] text-zinc-400 font-mono mt-1">
-                  Price ran into the 5m/15m gap and swept internal/session liquidity.
+                  Price ran into the 5m/15m gap and swept internal/session liquidity. Do we have strong structure or do we require a re-sweep?
                 </span>
               </div>
             </label>
@@ -424,56 +891,235 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
             {s4Complete && <CheckCircle2 size={16} className="text-teal-400" />}
           </div>
 
-          <div className="grid grid-cols-2 divide-x divide-white/10 border-b border-white/10">
-            <div className="p-3.5">
-              <label className="block font-mono text-[10px] font-bold uppercase text-teal-400 tracking-wider mb-1">
-                Account Size $
-              </label>
-              <input
-                type="number"
-                id="input-acct-size"
-                value={checklist.acctSize}
-                onChange={(e) => setChecklist((prev) => ({ ...prev, acctSize: e.target.value }))}
-                placeholder="50000"
-                className="w-full border border-white/10 bg-zinc-950/60 p-2.5 font-mono text-xs rounded-xl text-zinc-100 focus:outline-hidden focus:border-teal-400"
-              />
+          {/* Fixed Account Size (Updates with Profit) & Fixed Max Drawdown (From Account Details) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-white/10 border-b border-white/10 bg-zinc-950/40">
+            {/* Fixed Account Size that updates as profit grows */}
+            <div className="p-3.5 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="block font-mono text-[10px] font-bold uppercase text-teal-400 tracking-wider flex items-center gap-1.5">
+                  <Lock size={11} className="text-teal-400" />
+                  <span>Fixed Account Size $</span>
+                </label>
+                <span className="text-[9px] font-mono text-teal-300 bg-teal-950/80 border border-teal-500/30 px-1.5 py-0.5 rounded shadow-xs">
+                  UPDATES WITH PROFIT
+                </span>
+              </div>
+
+              {allowManualOverride ? (
+                <input
+                  type="number"
+                  id="input-acct-size"
+                  value={checklist.acctSize}
+                  onChange={(e) => setChecklist((prev) => ({ ...prev, acctSize: e.target.value }))}
+                  placeholder="50000"
+                  className="w-full border border-teal-400/50 bg-zinc-950 p-2.5 font-mono text-xs rounded-xl text-zinc-100 focus:outline-hidden focus:border-teal-400 shadow-inner"
+                />
+              ) : (
+                <div className="p-2.5 bg-zinc-900/80 border border-white/10 rounded-xl font-mono text-xs flex items-center justify-between shadow-xs">
+                  <span className="font-bold text-sm text-zinc-100 font-disp">
+                    ${effectiveAcctSize.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                  <span className={`text-[10px] font-bold ${activeAccountNetPnL >= 0 ? 'text-teal-300' : 'text-rose-400'}`}>
+                    {activeAccountNetPnL >= 0 ? '+' : ''}${activeAccountNetPnL.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
+                <span>Base: ${baseStartingBalance.toLocaleString()}</span>
+                <button
+                  type="button"
+                  onClick={() => setAllowManualOverride(!allowManualOverride)}
+                  className="text-zinc-500 hover:text-teal-300 underline underline-offset-2 transition-colors cursor-pointer"
+                >
+                  {allowManualOverride ? 'Lock to Live Balance' : 'Manual Override'}
+                </button>
+              </div>
             </div>
-            <div className="p-3.5">
-              <label className="block font-mono text-[10px] font-bold uppercase text-teal-400 tracking-wider mb-1">
-                Total Drawdown $
-              </label>
-              <input
-                type="number"
-                id="input-max-dd"
-                value={checklist.maxDD}
-                onChange={(e) => setChecklist((prev) => ({ ...prev, maxDD: e.target.value }))}
-                placeholder="2000"
-                className="w-full border border-white/10 bg-zinc-950/60 p-2.5 font-mono text-xs rounded-xl text-zinc-100 focus:outline-hidden focus:border-teal-400"
-              />
+
+            {/* Total Max Drawdown Limit (Fixed from Account Details) */}
+            <div className="p-3.5 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="block font-mono text-[10px] font-bold uppercase text-rose-300 tracking-wider flex items-center gap-1.5">
+                  <Shield size={11} className="text-rose-400" />
+                  <span>Max Drawdown Limit $</span>
+                </label>
+                <span className="text-[9px] font-mono text-rose-300 bg-rose-950/80 border border-rose-500/30 px-1.5 py-0.5 rounded shadow-xs">
+                  ACCOUNT FIXED
+                </span>
+              </div>
+
+              {allowManualOverride ? (
+                <input
+                  type="number"
+                  id="input-max-dd"
+                  value={checklist.maxDD}
+                  onChange={(e) => setChecklist((prev) => ({ ...prev, maxDD: e.target.value }))}
+                  placeholder="2500"
+                  className="w-full border border-rose-400/50 bg-zinc-950 p-2.5 font-mono text-xs rounded-xl text-zinc-100 focus:outline-hidden focus:border-rose-400 shadow-inner"
+                />
+              ) : (
+                <div className="p-2.5 bg-zinc-900/80 border border-white/10 rounded-xl font-mono text-xs flex items-center justify-between shadow-xs">
+                  <span className="font-bold text-sm text-rose-300 font-disp">
+                    ${effectiveDD.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                  <span className="text-[10px] text-zinc-400 font-mono">
+                    Floor: ${breachFloor.toLocaleString()}
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
+                <span>Cushion: <b className="text-zinc-200 font-bold">${currentDrawdownCushion.toLocaleString()}</b></span>
+                {onOpenManageModal && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenManageModal(activeAccount?.id)}
+                    className="text-teal-400 hover:text-teal-200 underline underline-offset-2 transition-colors cursor-pointer"
+                  >
+                    Edit Account DD
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
-          <div className="p-3.5 border-b border-white/10">
-            <label className="block font-mono text-[10px] font-bold uppercase text-teal-400 tracking-wider mb-1">
-              Risk Per Trade $
-            </label>
-            <input
-              type="number"
-              id="input-risk-trade"
-              value={checklist.riskPerTrade}
-              onChange={(e) => setChecklist((prev) => ({ ...prev, riskPerTrade: e.target.value }))}
-              placeholder="400"
-              className="w-full border border-white/10 bg-zinc-950/60 p-2.5 font-mono text-xs rounded-xl text-zinc-100 focus:outline-hidden focus:border-teal-400"
-            />
-          </div>
+          {/* Risk Per Trade (Can be actively edited + quick % presets) */}
+          <div className="p-3.5 border-b border-white/10 space-y-2 bg-zinc-900/30">
+            <div className="flex items-center justify-between">
+              <label className="block font-mono text-[10px] font-bold uppercase text-teal-300 tracking-wider flex items-center gap-1.5">
+                <Edit2 size={11} className="text-teal-400" />
+                <span>Risk Per Trade $ (Editable)</span>
+              </label>
+              {rpt > 0 && effectiveAcctSize > 0 && (
+                <span className="font-mono text-[11px] font-bold text-zinc-200 bg-white/5 border border-white/10 px-2 py-0.5 rounded">
+                  {riskPct.toFixed(2)}% of Account Size
+                </span>
+              )}
+            </div>
 
-          <div id="buffer-display" className="p-3.5 bg-zinc-950/40 font-mono text-xs border-b border-white/10 text-zinc-300">
-            {bufferCount !== null ? (
-              <span>
-                Buffer survives <b className="text-rose-400 font-bold text-sm underline decoration-rose-500/50">{bufferCount}</b> consecutive losses.
+            <div className="relative">
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 font-mono font-bold text-teal-400 text-sm">
+                $
               </span>
-            ) : (
-              <span className="text-zinc-500">Enter drawdown & risk to calculate buffer.</span>
+              <input
+                type="number"
+                id="input-risk-trade"
+                value={checklist.riskPerTrade}
+                onChange={(e) => setChecklist((prev) => ({ ...prev, riskPerTrade: e.target.value }))}
+                placeholder="400"
+                className="w-full pl-8 pr-4 py-2.5 border border-teal-500/40 focus:border-teal-400 bg-zinc-950 font-mono text-sm font-bold rounded-xl text-zinc-100 focus:outline-hidden focus:ring-1 focus:ring-teal-400 shadow-inner"
+              />
+            </div>
+
+            {/* Quick Risk % Presets based on Fixed Live Account Size */}
+            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+              <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider mr-1">
+                Risk Presets:
+              </span>
+              {[0.25, 0.5, 0.75, 1.0, 1.5, 2.0].map((pct) => {
+                const dollarRisk = Math.round((effectiveAcctSize * pct) / 100);
+                const isSelected = Math.round(rpt) === dollarRisk;
+                return (
+                  <button
+                    key={pct}
+                    type="button"
+                    onClick={() => setChecklist((prev) => ({ ...prev, riskPerTrade: String(dollarRisk) }))}
+                    className={`px-2 py-0.5 rounded-lg font-mono text-[10px] font-bold border transition-all cursor-pointer ${
+                      isSelected
+                        ? 'bg-teal-500/25 text-teal-300 border-teal-400 shadow-xs'
+                        : 'bg-zinc-950/70 text-zinc-400 border-white/10 hover:border-teal-500/40 hover:text-white'
+                    }`}
+                    title={`Set risk to ${pct}% ($${dollarRisk})`}
+                  >
+                    {pct}% (${dollarRisk})
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* DEDICATED RISK BUFFER ZONE & PROFIT TARGET TELEMETRY DISPLAY */}
+          <div id="buffer-display" className="p-4 bg-zinc-950/70 font-mono text-xs border-b border-white/10 space-y-3">
+            {/* Top Buffer Survival Badge */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl bg-zinc-900/90 border border-teal-500/30 shadow-xs">
+              <div className="flex items-center gap-2.5">
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 ${
+                  bufferCount !== null && bufferCount >= 6
+                    ? 'bg-teal-500/20 text-teal-300 border border-teal-500/40'
+                    : bufferCount !== null && bufferCount >= 4
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                }`}>
+                  <Shield size={16} />
+                </div>
+                <div>
+                  <div className="text-[10px] text-zinc-400 uppercase tracking-wider font-semibold">
+                    Risk Buffer Survival
+                  </div>
+                  {bufferCount !== null ? (
+                    <div className="text-sm font-bold text-zinc-100">
+                      Buffer survives <b className="text-teal-300 font-disp text-base">{bufferCount}</b> consecutive full losses.
+                    </div>
+                  ) : (
+                    <div className="text-xs text-zinc-500">
+                      Enter risk per trade to calculate loss streak capacity.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {bufferCount !== null && (
+                <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full uppercase tracking-wider border self-start sm:self-auto ${
+                  bufferCount >= 6
+                    ? 'bg-teal-950 text-teal-300 border-teal-500/40'
+                    : bufferCount >= 4
+                    ? 'bg-amber-950 text-amber-300 border-amber-500/40'
+                    : 'bg-rose-950 text-rose-300 border-rose-500/40 animate-pulse'
+                }`}>
+                  {bufferCount >= 6 ? 'SAFE BUFFER' : bufferCount >= 4 ? 'MODERATE' : 'TIGHT RISK'}
+                </span>
+              )}
+            </div>
+
+            {/* Profit Target Telemetry (Reflected directly into the Risk Buffer Zone!) */}
+            {targetGoal > 0 && (
+              <div className="p-3 rounded-xl bg-zinc-900/90 border border-white/10 space-y-2 shadow-xs">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="flex items-center gap-1.5 text-zinc-300 font-bold uppercase text-[11px]">
+                    <Target size={13} className="text-teal-400" />
+                    <span>Profit Target Milestone:</span>
+                    <b className="text-teal-300">${targetGoal.toLocaleString()}</b>
+                  </span>
+                  <span className="font-bold text-zinc-200 text-[11px]">
+                    {targetPct.toFixed(1)}% Achieved
+                  </span>
+                </div>
+
+                {/* Animated Progress Bar */}
+                <div className="w-full h-2 rounded-full bg-zinc-950 overflow-hidden border border-white/5">
+                  <div
+                    className="h-full bg-gradient-to-r from-teal-500 to-purple-500 rounded-full transition-all duration-500 shadow-[0_0_10px_rgba(45,212,191,0.5)]"
+                    style={{ width: `${targetPct}%` }}
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-zinc-400 pt-0.5">
+                  <span>
+                    Current Profit: <b className="text-teal-300">{activeAccountNetPnL >= 0 ? '+' : ''}${activeAccountNetPnL.toLocaleString()}</b>
+                  </span>
+                  <span>
+                    Remaining: <b className="text-zinc-200">${targetRemaining.toLocaleString()}</b>
+                  </span>
+                  {rpt > 0 && targetRemaining > 0 && (
+                    <span className="text-teal-300 font-semibold flex items-center gap-1.5">
+                      <span>Path:</span>
+                      <b className="text-white">~{winsAt15RNeeded} wins</b> at 1.5R max (${(rpt * 1.5).toFixed(0)}) |
+                      <b className="text-white">~{winsAt1RNeeded} wins</b> at 1.0R (${rpt.toFixed(0)})
+                    </span>
+                  )}
+                </div>
+              </div>
             )}
           </div>
 
@@ -487,7 +1133,10 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                 className="w-5 h-5 accent-teal-400 mt-0.5 cursor-pointer shrink-0 rounded"
               />
               <div className="text-xs leading-relaxed font-medium text-zinc-200">
-                Positive <b className="text-white">R:R Ratio</b> confirmed
+                Confirmed <b className="text-white">1:1 to 1.5R Max R:R</b> (Never Over 1.5R)
+                <span className="block text-[11px] text-teal-400 font-mono mt-0.5">
+                  Disciplined model: strictly between 1:1 and 1.5R take-profit.
+                </span>
               </div>
             </label>
 
@@ -623,7 +1272,7 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                 className="w-5 h-5 accent-teal-400 mt-0.5 cursor-pointer shrink-0 disabled:cursor-not-allowed rounded"
               />
               <div className="text-xs leading-relaxed font-medium text-zinc-200">
-                <b className="text-white">Inversion confirmed</b> off highest-TF gap?
+                <b className="text-white">Inversion confirmed</b> off highest-TF gap? Is the IFVG in 3 candles or less?
               </div>
             </label>
 
@@ -647,13 +1296,19 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
           </div>
         </div>
       </div>
+      </fieldset>
 
       {/* Manual Open / Close Flow Toggle helper */}
       <div className="mt-5 flex justify-end">
         <button
           type="button"
+          disabled={!clearanceRecord.allowed}
           onClick={() => setStatus(status === 'GO' ? 'STANDBY' : 'GO')}
-          className="text-xs font-mono text-zinc-500 hover:text-teal-400 underline transition-colors cursor-pointer"
+          className={`text-xs font-mono underline transition-colors cursor-pointer ${
+            !clearanceRecord.allowed
+              ? 'text-zinc-600 cursor-not-allowed opacity-40'
+              : 'text-zinc-500 hover:text-teal-400'
+          }`}
         >
           {status === 'GO' ? 'Hide Execution Log Form' : 'Show Execution Log Form Early'}
         </button>
@@ -677,14 +1332,65 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               {/* FIN: Daily Financials */}
               <div className="col-span-1 md:col-span-2 bg-zinc-900/60 border border-white/10 rounded-2xl overflow-hidden shadow-lg">
-                <div className="flex items-center gap-2.5 p-4 bg-white/[0.03] border-b border-white/10">
-                  <span className="bg-gradient-to-tr from-teal-400 to-purple-600 text-white font-mono text-[10px] px-2 py-0.5 rounded-lg font-bold shadow-[0_0_10px_rgba(45,212,191,0.3)]">
-                    FIN
-                  </span>
-                  <span className="font-disp font-bold text-sm uppercase text-zinc-100 tracking-wide">
-                    Daily Financials
-                  </span>
+                <div className="flex flex-wrap items-center justify-between gap-3 p-4 bg-white/[0.03] border-b border-white/10">
+                  <div className="flex items-center gap-2.5">
+                    <span className="bg-gradient-to-tr from-teal-400 to-purple-600 text-white font-mono text-[10px] px-2 py-0.5 rounded-lg font-bold shadow-[0_0_10px_rgba(45,212,191,0.3)]">
+                      FIN
+                    </span>
+                    <span className="font-disp font-bold text-sm uppercase text-zinc-100 tracking-wide">
+                      Daily Financials
+                    </span>
+                    {activeAccount && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-teal-500/10 text-teal-300 border border-teal-500/30 flex items-center gap-1">
+                          <Wallet size={11} />
+                          <span>ACCOUNT: [{activeAccount.type.toUpperCase()}] {activeAccount.name} (${activeAccount.initialBalance.toLocaleString()})</span>
+                        </span>
+                        {onOpenManageModal && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenManageModal(activeAccount.id)}
+                            className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-zinc-800 hover:bg-teal-500/20 text-zinc-300 hover:text-teal-300 border border-white/10 hover:border-teal-500/40 cursor-pointer transition-all flex items-center gap-1"
+                            title="Edit account details (name, starting figure, etc.)"
+                          >
+                            <Edit2 size={10} className="text-teal-400" />
+                            <span>Edit Account</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* BE Tick Box in Journal Section */}
+                  <label className="flex items-center gap-2.5 cursor-pointer bg-teal-950/40 hover:bg-teal-950/70 border border-teal-500/40 px-3.5 py-1.5 rounded-xl transition-all shadow-xs">
+                    <input
+                      type="checkbox"
+                      id="check-break-even-exec"
+                      checked={journalInputs.isBreakEven}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setJournalInputs((prev) => ({
+                          ...prev,
+                          isBreakEven: checked,
+                          ...(checked && prev.balBefore ? { balAfter: prev.balBefore, manualPnL: '0' } : {}),
+                        }));
+                      }}
+                      className="w-4 h-4 accent-teal-400 cursor-pointer rounded"
+                    />
+                    <span className="font-mono text-xs font-bold text-teal-300">
+                      BE (Break-Even) Trade
+                    </span>
+                  </label>
                 </div>
+
+                {journalInputs.isBreakEven && (
+                  <div className="p-3 bg-teal-950/60 border-b border-teal-500/30 text-teal-300 font-mono text-[11px] flex items-center gap-2 px-4">
+                    <CheckCircle2 size={15} className="text-teal-400 shrink-0" />
+                    <span>
+                      <b>BREAK-EVEN TICKED</b>: This trade will <b>not affect your win rate</b>. It will be recorded as neutral in journal analytics.
+                    </span>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-white/10 border-b border-white/10">
                   <div className="p-4">
@@ -695,7 +1401,14 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                       type="number"
                       id="bal-before"
                       value={journalInputs.balBefore}
-                      onChange={(e) => setJournalInputs((prev) => ({ ...prev, balBefore: e.target.value }))}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setJournalInputs((prev) => ({
+                          ...prev,
+                          balBefore: val,
+                          ...(prev.isBreakEven ? { balAfter: val, manualPnL: '0' } : {}),
+                        }));
+                      }}
                       placeholder="50000"
                       className="w-full border border-white/10 bg-zinc-950/60 p-3 font-mono text-xs rounded-xl text-zinc-100 focus:outline-hidden focus:border-teal-400"
                     />
@@ -708,10 +1421,11 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                     <input
                       type="number"
                       id="bal-after"
-                      value={journalInputs.balAfter}
+                      value={journalInputs.isBreakEven ? journalInputs.balBefore : journalInputs.balAfter}
                       onChange={(e) => setJournalInputs((prev) => ({ ...prev, balAfter: e.target.value }))}
                       placeholder="50800"
-                      className="w-full border border-white/10 bg-zinc-950/60 p-3 font-mono text-xs rounded-xl text-zinc-100 focus:outline-hidden focus:border-teal-400"
+                      disabled={journalInputs.isBreakEven}
+                      className="w-full border border-white/10 bg-zinc-950/60 p-3 font-mono text-xs rounded-xl text-zinc-100 focus:outline-hidden focus:border-teal-400 disabled:opacity-60"
                     />
                   </div>
 
@@ -722,9 +1436,9 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                     <input
                       type="number"
                       id="manual-pnl"
-                      value={journalInputs.manualPnL}
+                      value={journalInputs.isBreakEven ? (journalInputs.manualPnL || '0') : journalInputs.manualPnL}
                       onChange={(e) => setJournalInputs((prev) => ({ ...prev, manualPnL: e.target.value }))}
-                      placeholder={pnlDiff !== 0 ? pnlDiff.toFixed(2) : 'Auto-calculated'}
+                      placeholder={journalInputs.isBreakEven ? '0.00' : pnlDiff !== 0 ? pnlDiff.toFixed(2) : 'Auto-calculated'}
                       className="w-full border border-white/10 bg-zinc-950/60 p-3 font-mono text-xs rounded-xl text-zinc-100 focus:outline-hidden focus:border-teal-400"
                     />
                   </div>
@@ -734,15 +1448,23 @@ export const ExecutionView: React.FC<ExecutionViewProps> = ({
                   <div
                     id="pnl-result"
                     className={`p-5 text-center font-disp text-2xl sm:text-4xl font-bold rounded-2xl transition-all duration-300 border ${
-                      pnlDiff > 0
+                      journalInputs.isBreakEven
+                        ? 'bg-teal-950/30 text-teal-200 border-teal-400/50 shadow-[0_0_20px_rgba(45,212,191,0.2)]'
+                        : pnlDiff > 0
                         ? 'bg-teal-950/40 text-teal-300 border-teal-500/50 shadow-[0_0_25px_rgba(45,212,191,0.3)]'
                         : pnlDiff < 0
                         ? 'bg-rose-950/30 text-rose-400 border-rose-500/50 shadow-[0_0_25px_rgba(244,63,94,0.3)]'
                         : 'bg-white/5 text-zinc-300 border-white/10'
                     }`}
                   >
-                    NET RESULT: {pnlDiff >= 0 ? '+' : ''}
-                    ${Math.abs(pnlDiff).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    {journalInputs.isBreakEven ? (
+                      <span>BREAK-EVEN RESULT: $0.00 (DOES NOT AFFECT WIN RATE)</span>
+                    ) : (
+                      <span>
+                        NET RESULT: {pnlDiff >= 0 ? '+' : ''}
+                        ${Math.abs(pnlDiff).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>

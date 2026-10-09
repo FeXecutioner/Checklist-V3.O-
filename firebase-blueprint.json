@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "entities": {
+    "PrivateSyncData": {
+      "title": "PrivateSyncData",
+      "description": "User private sync documents restricted to owner",
+      "type": "object",
+      "properties": {
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the record was synchronized"
+        },
+        "payload": {
+          "type": "string",
+          "description": "Serialized data payload for user personal device sync"
+        }
+      }
+    }
+  },
+  "firestore": {
+    "/privateSync/{uid}/{document=**}": {
+      "schema": "PrivateSyncData",
+      "description": "Private synchronization collection accessible only by the verified owner"
+    }
+  }
+}

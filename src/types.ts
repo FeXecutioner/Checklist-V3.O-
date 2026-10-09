@@ -1,5 +1,19 @@
-export type SetupType = 'continuation' | 'reversal';
+export type SetupType = 'continuation' | 'reversal' | 'no_trade';
 export type GateStatus = 'NO-GO' | 'STANDBY' | 'GO';
+export type AccountType = 'live' | 'demo' | 'funded' | 'evaluation';
+
+export interface TradingAccount {
+  id: string;
+  name: string;
+  type: AccountType;
+  initialBalance: number;
+  maxDrawdown?: number;
+  profitTarget?: number;
+  currency: string;
+  notes?: string;
+  createdAt: string;
+  isDefault?: boolean;
+}
 
 export interface ChecklistState {
   // S1
@@ -19,6 +33,7 @@ export interface ChecklistState {
   acctSize: string;
   maxDD: string;
   riskPerTrade: string;
+  profitTarget?: string;
   rrRatio: boolean;
   clearLiquidity: boolean;
   inversionSpeed: boolean;
@@ -35,6 +50,7 @@ export interface ExecutionJournalInputs {
   balBefore: string;
   balAfter: string;
   manualPnL: string;
+  isBreakEven: boolean;
   htfLogic: string;
   ltfTarget: string;
   entryModelTime: string;
@@ -52,8 +68,13 @@ export interface TradeRecord {
   timestamp: string;
   setup: SetupType;
   directionalBias: string;
+  accountId?: string;
+  accountName?: string;
+  accountType?: AccountType;
+  isBreakEven?: boolean;
   accountSize?: number;
   maxDrawdown?: number;
+  profitTarget?: number;
   riskPerTrade?: number;
   bufferSurvivalTrades?: number;
   balanceBefore: number;
@@ -70,6 +91,8 @@ export interface TradeRecord {
   emotionsControlled: boolean;
   ruleBreaks: string;
   improvements: string;
+  isNoTradeDay?: boolean;
+  noTradeReason?: string;
   checklistSummary: {
     s1Done: boolean;
     s2Done: boolean;

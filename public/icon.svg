@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0e0f14"/>
+      <stop offset="100%" stop-color="#050608"/>
+    </linearGradient>
+    <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2dd4bf"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#9333ea"/>
+    </linearGradient>
+    <linearGradient id="glowGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2dd4bf" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#9333ea" stop-opacity="0.1"/>
+    </linearGradient>
+    <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="12" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="512" height="512" rx="100" fill="url(#bgGrad)"/>
+  <rect width="504" height="504" x="4" y="4" rx="96" fill="none" stroke="url(#brandGrad)" stroke-width="3" stroke-opacity="0.35"/>
+
+  <!-- Subtle Target Radar Grids -->
+  <circle cx="256" cy="256" r="180" fill="none" stroke="#2dd4bf" stroke-width="1.5" stroke-opacity="0.15" stroke-dasharray="8 6"/>
+  <circle cx="256" cy="256" r="120" fill="none" stroke="#9333ea" stroke-width="1.5" stroke-opacity="0.2"/>
+  <circle cx="256" cy="256" r="60" fill="none" stroke="#2dd4bf" stroke-width="1.5" stroke-opacity="0.25"/>
+
+  <!-- Crosshair Reticles -->
+  <line x1="256" y1="56" x2="256" y2="100" stroke="#2dd4bf" stroke-width="3" stroke-linecap="round" stroke-opacity="0.6"/>
+  <line x1="256" y1="412" x2="256" y2="456" stroke="#2dd4bf" stroke-width="3" stroke-linecap="round" stroke-opacity="0.6"/>
+  <line x1="56" y1="256" x2="100" y2="256" stroke="#2dd4bf" stroke-width="3" stroke-linecap="round" stroke-opacity="0.6"/>
+  <line x1="412" y1="256" x2="456" y2="256" stroke="#2dd4bf" stroke-width="3" stroke-linecap="round" stroke-opacity="0.6"/>
+
+  <!-- Glowing Central Hexagon & Execution 'FX' Monogram -->
+  <polygon points="256,120 370,186 370,326 256,392 142,326 142,186" fill="url(#glowGrad)" stroke="url(#brandGrad)" stroke-width="4" filter="url(#neonGlow)"/>
+
+  <!-- Geometric F-Execution Mark -->
+  <!-- Upper horizontal arm -->
+  <path d="M 210 176 L 310 176" stroke="#2dd4bf" stroke-width="16" stroke-linecap="round"/>
+  <!-- Middle arm -->
+  <path d="M 210 246 L 285 246" stroke="#38bdf8" stroke-width="14" stroke-linecap="round"/>
+  <!-- Vertical spine -->
+  <path d="M 210 176 L 210 336" stroke="#2dd4bf" stroke-width="16" stroke-linecap="round"/>
+
+  <!-- Execution Dynamic Chevron (Arrow / Flash) -->
+  <polyline points="290,280 330,320 290,360" fill="none" stroke="#c084fc" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" filter="url(#neonGlow)"/>
+
+  <!-- Core Pulse Point -->
+  <circle cx="256" cy="256" r="6" fill="#2dd4bf"/>
+</svg>
